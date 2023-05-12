@@ -1,0 +1,13 @@
+{
+    "secrets": [
+      {
+        "id": "client-id",
+        "value": "abc123"
+      },
+      {
+        "id": "client-secret",
+        "value": "abc123"
+      }
+    ]
+  }
+  
