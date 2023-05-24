@@ -4,6 +4,7 @@ import os
 import statistics
 import sys
 import json
+import re
 
 # read client ID and client secret from keys.json
 with open('keys.json') as f:
@@ -16,97 +17,78 @@ os.environ["SPOTIPY_CLIENT_ID"] = client_id
 os.environ["SPOTIPY_CLIENT_SECRET"] = client_secret
 os.environ["SPOTIPY_REDIRECT_URI"] = "http://localhost:3000"
 
-# define scope
+# setup spotify api
 scope = "playlist-read-private"
-
-# create SpotifyOAuth object
 sp_oauth = SpotifyOAuth(scope=scope)
-
-# get access token
-# get access token
 token_info = sp_oauth.get_access_token(as_dict=False)
-
-# create Spotify object
 sp = spotipy.Spotify(auth_manager=SpotifyOAuth())
 
-# get playlist ID
-playlist_link = sys.argv[1]
-playlist = sp.playlist(playlist_link)
-playlist_id = playlist['id']
-playlist_name = playlist['name']
+# create directory to store downloaded images
+if not os.path.exists("playlist_statistics"):
+    os.makedirs("playlist_statistics")
 
-# Get tracks from playlist
-tracks = sp.playlist_tracks(playlist_id)
+def process_playlist(playlist_id, playlist_name):
+    # Get tracks from playlist
+    tracks = []
+    results = sp.playlist_tracks(playlist_id)
+    tracks.extend(results['items'])
+    while results['next']:
+        results = sp.next(results)
+        tracks.extend(results['items'])
 
-audio_features = []
-for track in tracks['items']:
-    features = sp.audio_features(track['track']['id'])[0]
-    audio_features.append(features)
+    audio_features = []
+    for track in tracks:
+        audio_feature = sp.audio_features(track['track']['id'])
+        if audio_feature:
+            audio_features.append(audio_feature[0])
 
-# Calculate average values for audio features
-feature_values = {
-    'energy': [],
-    'danceability': [],
-    'tempo': [],
-    'valence': [],
-    'acousticness': [],
-    'instrumentalness': [],
-    'liveness': [],
-    'speechiness': []
-}
-for feature in feature_values.keys():
-    feature_values[feature] = [track_feature[feature] for track_feature in audio_features]
+    feature_values = {feature: [track_feature[feature] for track_feature in audio_features] for feature in
+                      ['energy', 'danceability', 'tempo', 'valence', 'acousticness', 'instrumentalness',
+                       'liveness', 'speechiness']}
 
-outliers = {}
-for feature, values in feature_values.items():
-    avg_feature = statistics.mean(values)
-    stdev_feature = statistics.stdev(values)
-    for i, track_feature in enumerate(values):
-        if abs(track_feature - avg_feature) > 2 * stdev_feature:
-            if feature not in outliers:
-                outliers[feature] = []
-            track_name = tracks['items'][i]['track']['name']
-            outliers[feature].append((track_name, track_feature))
+    outliers = {}
+    for feature, values in feature_values.items():
+        avg_feature = statistics.mean(values)
+        stdev_feature = statistics.stdev(values)
+        outliers[feature] = [(track['track']['name'], track_feature) for track, track_feature in zip(tracks, values)
+                             if abs(track_feature - avg_feature) > 3 * stdev_feature]
 
-# Calculate average values for audio features
-energy_values = [feature['energy'] for feature in audio_features]
-danceability_values = [feature['danceability'] for feature in audio_features]
-tempo_values = [feature['tempo'] for feature in audio_features]
-valence_values = [feature['valence'] for feature in audio_features]
-acousticness_values = [feature['acousticness'] for feature in audio_features]
-instrumentalness_values = [feature['instrumentalness'] for feature in audio_features]
-liveness_values = [feature['liveness'] for feature in audio_features]
-speechiness_values = [feature['speechiness'] for feature in audio_features]
+    averages = {feature: statistics.mean(values) for feature, values in feature_values.items()}
+    stddevs = {feature: statistics.stdev(values) for feature, values in feature_values.items()}
 
-avg_energy = statistics.mean(energy_values)
-avg_danceability = statistics.mean(danceability_values)
-avg_tempo = statistics.mean(tempo_values)
-avg_valence = statistics.mean(valence_values)
-avg_acousticness = statistics.mean(acousticness_values)
-avg_instrumentalness = statistics.mean(instrumentalness_values)
-avg_liveness = statistics.mean(liveness_values)
-avg_speechiness = statistics.mean(speechiness_values)
-
-# Print significant outliers
-filename = str(playlist_name.replace(':','') + ' - audio_features.txt')
-with open(filename, 'w') as f:
-    f.write(f'Playlist: {playlist_name}\n\n')
-
-    f.write('Average energy: ' + str(avg_energy) + '\n')
-    f.write('Average danceability: ' + str(avg_danceability) + '\n')
-    f.write('Average tempo: ' + str(avg_tempo) + '\n')
-    f.write('Average valence: ' + str(avg_valence) + '\n')
-    f.write('Average acousticness: ' + str(avg_acousticness) + '\n')
-    f.write('Average instrumentalness: ' + str(avg_instrumentalness) + '\n')
-    f.write('Average liveness: ' + str(avg_liveness) + '\n')
-    f.write('Average speechiness: ' + str(avg_speechiness) + '\n\n')
-
-    for feature, tracks in outliers.items():
-        f.write(f'{feature.capitalize()} outliers:\n')
-        for track in tracks:
-            track_name = track[0]
-            track_feature = track[1]
-            f.write(f'\t{track_name} ({track_feature:.2f})\n')
-            #print(f'{track_name} is a significant outlier in {feature}')
+    filename = "playlist_statistics/" + (re.sub(r'[<>:"/\\|?*\x00-\x1F]', '', playlist_name)).strip() + ' - audio_features.txt'
+    with open(filename, 'w') as f:
+        f.write(f'Playlist: {playlist_name}\n')
+        f.write(f'no. tracks: {len(tracks)}\n\n')
+        for feature in feature_values.keys():
+            f.write(f'Average {feature}: {averages[feature]:.2f} | stdev: {stddevs[feature]:.2f}\n')
         f.write('\n')
-    print('Significant outliers printed to file.')
+
+        for feature, tracks in outliers.items():
+            if tracks:
+                f.write(f'{feature.capitalize()} outliers:\n')
+                for track in tracks:
+                    f.write(f'\t{track[0]} ({track[1]:.2f})\n')
+                f.write('\n')
+        print('Significant outliers printed to file.')
+
+
+url = sys.argv[1]
+
+# Check if the playlist_link is a single URL link or a file containing multiple playlist URLs
+if url.startswith('http'):
+    # Process a single playlist URL
+    playlist_id = re.search(r"playlist\/(\w+)", url).group(1)
+    playlist = sp.playlist(playlist_id)
+    playlist_name = playlist['name']
+    process_playlist(playlist_id,playlist_name)
+else:
+    # Read playlist URLs from a text file
+    with open(url, "r") as f:
+        playlist_urls = [line.strip() for line in f]
+
+    for playlist_url in playlist_urls:
+        playlist = sp.playlist(playlist_url)
+        playlist_id = playlist['id']
+        playlist_name = playlist['name']
+        process_playlist(playlist_id,playlist_name)
